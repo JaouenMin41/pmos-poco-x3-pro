@@ -1,0 +1,48 @@
+name: Noyau
+
+on:
+  push:
+    paths:
+      - "kernel/**"
+      - "scripts/build-kernel.sh"
+      - ".github/workflows/kernel.yml"
+  pull_request:
+    paths:
+      - "kernel/**"
+      - "scripts/build-kernel.sh"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compilation (clang)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dépendances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libssl-dev libelf-dev clang lld llvm python3 yamllint
+          pip install --user dtschema
+
+      - name: Compiler les DTB vayu (avec vérification de schéma)
+        run: |
+          ./scripts/build-kernel.sh --dtbs
+          cd build/linux
+          make ARCH=arm64 LLVM=1 CHECK_DTBS=y \
+            qcom/sm8150-xiaomi-vayu-tianma.dtb qcom/sm8150-xiaomi-vayu-csot.dtb 2>&1 | tee ../dtbs-check.log
+
+      - name: Compiler le noyau complet
+        run: ./scripts/build-kernel.sh
+
+      - name: Artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: noyau-vayu-${{ github.sha }}
+          path: |
+            build/linux/arch/arm64/boot/Image.gz
+            build/linux/arch/arm64/boot/dts/qcom/sm8150-xiaomi-vayu-*.dtb
+            build/linux/.config
+            build/dtbs-check.log

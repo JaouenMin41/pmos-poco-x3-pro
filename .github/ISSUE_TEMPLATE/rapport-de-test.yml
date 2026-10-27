@@ -1,0 +1,63 @@
+name: Rapport de test
+description: Résultats d'un test sur un vrai POCO X3 Pro
+title: "[Test] "
+labels: ["test"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci de tester ! Les identifiants de test (T01, T02…) sont décrits dans
+        [docs/TESTS.md](https://github.com/JaouenMin41/pmos-poco-x3-pro/blob/main/docs/TESTS.md).
+  - type: dropdown
+    id: panel
+    attributes:
+      label: Dalle d'écran
+      options:
+        - Tianma (dsi_j20s_36_02_0a)
+        - CSOT (dsi_j20s_42_02_0b)
+        - Je ne sais pas
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version du dépôt testée
+      description: Commit ou tag de pmos-poco-x3-pro (`git rev-parse --short HEAD`)
+    validations:
+      required: true
+  - type: dropdown
+    id: method
+    attributes:
+      label: Méthode d'installation
+      options:
+        - "A : microSD + fastboot boot"
+        - "B : mémoire interne"
+    validations:
+      required: true
+  - type: dropdown
+    id: ui
+    attributes:
+      label: Interface
+      options:
+        - console
+        - phosh
+        - plasma-mobile
+        - autre
+  - type: textarea
+    id: results
+    attributes:
+      label: Résultats
+      description: Un test par ligne, avec ✅ / ❌ / ⚠️ et un commentaire.
+      value: |
+        T01 :
+        T02 :
+        T03 :
+        T04 :
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Joignez le fichier `dmesg` (glisser-déposer) ou collez les lignes utiles.
+      render: text

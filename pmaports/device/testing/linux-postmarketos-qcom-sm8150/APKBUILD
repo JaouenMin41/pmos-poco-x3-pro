@@ -1,0 +1,85 @@
+# Maintainer: Caleb Connolly <caleb@connolly.tech>
+# Co-Maintainer: Alexey Min <alexeymin@postmarketos.org>
+# Contributor: Jaouen <74923920+JaouenMin41@users.noreply.github.com>
+# Stable Linux kernel with patches for SM8150 devices
+# Kernel config based on: arch/arm64/configs/defconfig, sm8150.config and
+# the vayu fragment from https://github.com/JaouenMin41/pmos-poco-x3-pro
+#
+# Overlay package from pmos-poco-x3-pro: replaces the pmaports one to bring
+# back Xiaomi POCO X3 Pro (vayu) support on top of sm8150-mainline 6.17.
+
+_flavor="postmarketos-qcom-sm8150"
+pkgname=linux-$_flavor
+pkgver=6.17.0
+pkgrel=100
+pkgdesc="Mainline Kernel fork for SM8150 devices (with POCO X3 Pro support)"
+arch="aarch64"
+_carch="arm64"
+url="https://gitlab.com/sm8150-mainline/linux"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps
+	pmb:cross-native
+	pmb:kconfigcheck-community
+	"
+makedepends="
+	bash
+	bison
+	findutils
+	flex
+	openssl-dev
+	perl
+	postmarketos-installkernel
+	python3
+	xz
+"
+
+_config="config-$_flavor.$arch"
+# sm8150-mainline, branch sm8150/6.17
+_commit="c340f8ec4fa41eb94b82f233ddcce15fd0aaec17"
+
+# Source
+source="
+	linux-$_commit.tar.gz::$url/-/archive/$_commit/linux-$_commit.tar.gz
+	$_config
+	0001-Input-touchscreen-import-Novatek-NT36xxx-SPI-driver.patch
+	0002-drm-panel-add-driver-for-Xiaomi-POCO-X3-Pro-NT36672C.patch
+	0003-arm64-dts-qcom-add-Xiaomi-POCO-X3-Pro-vayu.patch
+	0004-arm64-dts-qcom-sm8150-xiaomi-raphael-drop-reference-.patch
+	0005-arm64-configs-sm8150-update-the-POCO-X3-Pro-section.patch
+"
+builddir="$srcdir/linux-$_commit"
+
+prepare() {
+	default_prepare
+	cp "$srcdir/$_config" .config
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-$_flavor"
+}
+
+package() {
+	mkdir -p "$pkgdir"/boot
+	make zinstall modules_install dtbs_install \
+		ARCH="$_carch" \
+		INSTALL_PATH="$pkgdir"/boot/ \
+		INSTALL_MOD_PATH="$pkgdir" \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs
+	rm -f "$pkgdir"/lib/modules/*/build "$pkgdir"/lib/modules/*/source
+
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+sha512sums="
+f80eba1d283518e91b60ffb8a37b50a4b04a410ad10476b30ddabf910d512883df6dd5754011287f9d2be08657c0c20cb1bcc553d657127e12c748bb155733fe  linux-c340f8ec4fa41eb94b82f233ddcce15fd0aaec17.tar.gz
+60c91f5924e8904ac9dcbc564b4d0278036f9ab44472c11adc262b850afb9b31b3383ccf46eebfbf7b76c11d424d6e79b85bc774bccc918ae40543e5d7c485d4  config-postmarketos-qcom-sm8150.aarch64
+fc208507f8bdfe67589c6d1721e740e8dfadb9ec484c2d328fb1ca50aefd06d385d3ad33fbfa26af464552deb0a681588532548c5c10e37909a0f8ffb2b86342  0001-Input-touchscreen-import-Novatek-NT36xxx-SPI-driver.patch
+83bae76a3e6679041f9a86e014fb715ad27a80dd633860bb7cd855f4806d505d9173c6c6666a1cdba21c8a89bb82045ab21c6a5ba4155303b1c1beeb80478123  0002-drm-panel-add-driver-for-Xiaomi-POCO-X3-Pro-NT36672C.patch
+424111dbdc87dd70ddabf0e10eb7465f2c32afff5a15969710679ffd76c039ca8a1e6cc506a9b6fbc84e0ffa6f80a4129a310786e989da6f4b3426e2d5fe142c  0003-arm64-dts-qcom-add-Xiaomi-POCO-X3-Pro-vayu.patch
+643a22fad41a77b5d036c3be49c3ead315c6a10e382f25f7a7dabb4a2da032660bab2d019480f31e4c052b4251acf459e12503f6f740bd9ffdec3c06f9c8e11f  0004-arm64-dts-qcom-sm8150-xiaomi-raphael-drop-reference-.patch
+83e91941b04e5c6fd4619c7c4f20623cb1af2d9c30107b0fef98e221e9809fc571eee9bfc11dcb9ffc36438f346b0500ec149e29d442177d50588f89b06bfb2d  0005-arm64-configs-sm8150-update-the-POCO-X3-Pro-section.patch
+"

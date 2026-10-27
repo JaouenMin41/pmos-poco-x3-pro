@@ -1,0 +1,549 @@
+From 853d0dd1004fe30269cb3f07f7403e764385f715 Mon Sep 17 00:00:00 2001
+From: Jaouen <74923920+JaouenMin41@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 04:32:04 +0000
+Subject: [PATCH 2/5] drm/panel: add driver for Xiaomi POCO X3 Pro NT36672C
+ panels
+
+The POCO X3 Pro (vayu) ships with one of two 1080x2400 120 Hz video
+mode DSC LCD panels driven by a Novatek NT36672C controller:
+  - Tianma (downstream: dsi_j20s_36_02_0a_video_display)
+  - CSOT   (downstream: dsi_j20s_42_02_0b_video_display)
+
+Both share the same timings and DSC configuration and only differ in
+their initialization sequence. The sequences were generated with
+linux-mdss-dsi-panel-driver-generator from the vendor device tree
+(MiCode/Xiaomi_Kernel_OpenSource, branch vayu-r-oss).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Maqjg6rG5ZJyxi8ZriSu69
+---
+ drivers/gpu/drm/panel/Kconfig                 |  12 +
+ drivers/gpu/drm/panel/Makefile                |   1 +
+ .../drm/panel/panel-xiaomi-vayu-nt36672c.c    | 486 ++++++++++++++++++
+ 3 files changed, 499 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-xiaomi-vayu-nt36672c.c
+
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index d3aaea989..b52605035 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -1135,6 +1135,18 @@ config DRM_PANEL_WIDECHIPS_WS2401
+ 	  480x800 display controller used in panels such as Samsung LMS380KF01.
+ 	  This display is used in the Samsung Galaxy Ace 2 GT-I8160 (Codina).
+ 
++config DRM_PANEL_XIAOMI_VAYU_NT36672C
++	tristate "Xiaomi POCO X3 Pro (vayu) NT36672C DSC panels"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_DSC_HELPER
++	select DRM_DISPLAY_HELPER
++	help
++	  Say Y here if you want to enable support for the Tianma and CSOT
++	  1080x2400 120 Hz video mode DSC panels, driven by a Novatek
++	  NT36672C controller, found in the Xiaomi POCO X3 Pro.
++
+ config DRM_PANEL_XINPENG_XPP055C272
+ 	tristate "Xinpeng XPP055C272 panel driver"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index a386bac30..85edd31f7 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -115,3 +115,4 @@ obj-$(CONFIG_DRM_PANEL_VISIONOX_VTDR6130) += panel-visionox-vtdr6130.o
+ obj-$(CONFIG_DRM_PANEL_VISIONOX_R66451) += panel-visionox-r66451.o
+ obj-$(CONFIG_DRM_PANEL_WIDECHIPS_WS2401) += panel-widechips-ws2401.o
+ obj-$(CONFIG_DRM_PANEL_XINPENG_XPP055C272) += panel-xinpeng-xpp055c272.o
++obj-$(CONFIG_DRM_PANEL_XIAOMI_VAYU_NT36672C) += panel-xiaomi-vayu-nt36672c.o
+diff --git a/drivers/gpu/drm/panel/panel-xiaomi-vayu-nt36672c.c b/drivers/gpu/drm/panel/panel-xiaomi-vayu-nt36672c.c
+new file mode 100644
+index 000000000..370ab9114
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-xiaomi-vayu-nt36672c.c
+@@ -0,0 +1,486 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * NT36672C based DSC video mode panels found in the Xiaomi POCO X3 Pro (vayu).
++ *
++ * Two panel variants exist, identified by the downstream display node name:
++ *   dsi_j20s_36_02_0a_video_display -> Tianma
++ *   dsi_j20s_42_02_0b_video_display -> CSOT
++ *
++ * Generated with linux-mdss-dsi-panel-driver-generator from the vendor device
++ * tree (MiCode/Xiaomi_Kernel_OpenSource, branch vayu-r-oss), then merged into
++ * a single driver since both variants only differ in their init sequence.
++ *   Copyright (c) 2020, The Linux Foundation. All rights reserved.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++struct vayu_panel_desc {
++	void (*init)(struct mipi_dsi_multi_context *dsi_ctx);
++};
++
++struct vayu_panel {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct regulator *supply;
++	struct gpio_desc *reset_gpio;
++	const struct vayu_panel_desc *desc;
++};
++
++static inline struct vayu_panel *to_vayu_panel(struct drm_panel *panel)
++{
++	return container_of(panel, struct vayu_panel, panel);
++}
++
++static void vayu_panel_reset(struct vayu_panel *ctx)
++{
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(5000, 6000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++}
++
++static void vayu_tianma_init(struct mipi_dsi_multi_context *dsi_ctx)
++{
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x24);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4d, 0x02);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4e, 0x30);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4f, 0x30);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x53, 0x30);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x7a, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x7b, 0x8c);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x7d, 0x05);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x80, 0x05);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x81, 0x05);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xa0, 0x0c);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xa2, 0x0c);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xa3, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xa4, 0x05);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xa5, 0x05);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xc4, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xc6, 0xc0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xe9, 0x02);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x25);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xda, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xe0, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xf1, 0x04);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x2b);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xb7, 0x08);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xb8, 0x1a);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xc0, 0x04);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0xf0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x1c, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x33, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x23);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x00, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x01, 0x84);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x05, 0x2d);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x06, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x07, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x08, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x09, 0x45);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x11, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x12, 0x95);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x15, 0x68);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x16, 0x0b);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x29, 0x0a);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x30, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x31, 0xfe);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x32, 0xfd);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x33, 0xfb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x34, 0xf8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x35, 0xf5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x36, 0xf3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x37, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x38, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x39, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3a, 0xef);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3b, 0xec);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3d, 0xe9);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3f, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x41, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x2a, 0x13);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x45, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x46, 0xf4);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x47, 0xe7);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x48, 0xda);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x49, 0xcd);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4a, 0xc0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4b, 0xb3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4c, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4d, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4e, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4f, 0x99);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x50, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x51, 0x68);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x52, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x53, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x54, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x2b, 0x0e);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x58, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x59, 0xfb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5a, 0xf7);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5b, 0xf3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5c, 0xef);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5d, 0xe3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5e, 0xda);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5f, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x60, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x61, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x62, 0xcb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x63, 0xbf);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x64, 0xb3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x65, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x66, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x67, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x27);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0x20);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xc0, 0x03);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x51, 0x0d, 0xb5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x53, 0x24);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x11, 0x00);
++	mipi_dsi_msleep(dsi_ctx, 70);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x29, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x27);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3f, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x43, 0x08);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0x25);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++}
++
++static void vayu_csot_init(struct mipi_dsi_multi_context *dsi_ctx)
++{
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x20);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xee, 0x60);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xef, 0x06);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x23);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x00, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x01, 0x84);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x05, 0x2d);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x06, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x07, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x08, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x09, 0x45);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x11, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x12, 0x95);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x15, 0x68);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x16, 0x0b);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x29, 0x0a);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x30, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x31, 0xfe);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x32, 0xfd);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x33, 0xfb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x34, 0xf8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x35, 0xf5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x36, 0xf3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x37, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x38, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x39, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3a, 0xef);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3b, 0xec);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3d, 0xe9);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3f, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x41, 0xe5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x2a, 0x13);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x45, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x46, 0xf4);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x47, 0xe7);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x48, 0xda);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x49, 0xcd);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4a, 0xc0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4b, 0xb3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4c, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4d, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4e, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x4f, 0x99);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x50, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x51, 0x68);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x52, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x53, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x54, 0x66);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x2b, 0x0e);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x58, 0xff);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x59, 0xfb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5a, 0xf7);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5b, 0xf3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5c, 0xef);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5d, 0xe3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5e, 0xda);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x5f, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x60, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x61, 0xd8);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x62, 0xcb);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x63, 0xbf);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x64, 0xb3);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x65, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x66, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x67, 0xb2);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x20);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x1f, 0xc0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x20, 0xc0);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x25);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xd6, 0x80);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xd7, 0x02);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xdd, 0x02);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x27);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0x20);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xc0, 0x03);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x51, 0x0d, 0xb5);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x53, 0x24);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x11, 0x00);
++	mipi_dsi_msleep(dsi_ctx, 70);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x29, 0x00);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x27);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x3f, 0x01);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x43, 0x08);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0x40, 0x25);
++	mipi_dsi_dcs_write_seq_multi(dsi_ctx, 0xff, 0x10);
++}
++
++static int vayu_panel_on(struct vayu_panel *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->desc->init(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int vayu_panel_off(struct vayu_panel *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xff, 0x10);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfb, 0x01);
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_usleep_range(&dsi_ctx, 16000, 17000);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 60);
++
++	return dsi_ctx.accum_err;
++}
++
++static int vayu_panel_prepare(struct drm_panel *panel)
++{
++	struct vayu_panel *ctx = to_vayu_panel(panel);
++	struct device *dev = &ctx->dsi->dev;
++	struct drm_dsc_picture_parameter_set pps;
++	int ret;
++
++	ret = regulator_enable(ctx->supply);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable regulator: %d\n", ret);
++		return ret;
++	}
++
++	vayu_panel_reset(ctx);
++
++	ret = vayu_panel_on(ctx);
++	if (ret < 0) {
++		dev_err(dev, "Failed to initialize panel: %d\n", ret);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		regulator_disable(ctx->supply);
++		return ret;
++	}
++
++	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
++
++	ret = mipi_dsi_picture_parameter_set(ctx->dsi, &pps);
++	if (ret < 0) {
++		dev_err(dev, "Failed to transmit PPS: %d\n", ret);
++		return ret;
++	}
++
++	ret = mipi_dsi_compression_mode(ctx->dsi, true);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable compression mode: %d\n", ret);
++		return ret;
++	}
++
++	msleep(28);
++
++	return 0;
++}
++
++static int vayu_panel_unprepare(struct drm_panel *panel)
++{
++	struct vayu_panel *ctx = to_vayu_panel(panel);
++	struct device *dev = &ctx->dsi->dev;
++	int ret;
++
++	ret = vayu_panel_off(ctx);
++	if (ret < 0)
++		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	regulator_disable(ctx->supply);
++
++	return 0;
++}
++
++/* Both variants share the same timings (downstream: 120 Hz DSC video mode) */
++static const struct drm_display_mode vayu_panel_mode = {
++	.clock = (1080 + 67 + 12 + 40) * (2400 + 33 + 2 + 30) * 120 / 1000,
++	.hdisplay = 1080,
++	.hsync_start = 1080 + 67,
++	.hsync_end = 1080 + 67 + 12,
++	.htotal = 1080 + 67 + 12 + 40,
++	.vdisplay = 2400,
++	.vsync_start = 2400 + 33,
++	.vsync_end = 2400 + 33 + 2,
++	.vtotal = 2400 + 33 + 2 + 30,
++	.width_mm = 70,
++	.height_mm = 154,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
++static int vayu_panel_get_modes(struct drm_panel *panel,
++				struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &vayu_panel_mode);
++}
++
++static const struct drm_panel_funcs vayu_panel_funcs = {
++	.prepare = vayu_panel_prepare,
++	.unprepare = vayu_panel_unprepare,
++	.get_modes = vayu_panel_get_modes,
++};
++
++static int vayu_panel_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct vayu_panel *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct vayu_panel, panel,
++				   &vayu_panel_funcs, DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ctx->desc = of_device_get_match_data(dev);
++	if (!ctx->desc)
++		return -ENODEV;
++
++	ctx->supply = devm_regulator_get(dev, "vddio");
++	if (IS_ERR(ctx->supply))
++		return dev_err_probe(dev, PTR_ERR(ctx->supply),
++				     "Failed to get vddio regulator\n");
++
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "Failed to get reset-gpios\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++			  MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
++
++	ctx->panel.prepare_prev_first = true;
++
++	ret = drm_panel_of_backlight(&ctx->panel);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to get backlight\n");
++
++	drm_panel_add(&ctx->panel);
++
++	/* This panel only supports DSC; unconditionally enable it */
++	dsi->dsc = &ctx->dsc;
++
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++
++	/* TODO: Pass slice_per_pkt = 2 */
++	ctx->dsc.slice_height = 20;
++	ctx->dsc.slice_width = 540;
++	ctx->dsc.slice_count = 1080 / ctx->dsc.slice_width;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
++	ctx->dsc.block_pred_enable = true;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_panel_remove(&ctx->panel);
++		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
++	}
++
++	return 0;
++}
++
++static void vayu_panel_remove(struct mipi_dsi_device *dsi)
++{
++	struct vayu_panel *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct vayu_panel_desc vayu_tianma_desc = {
++	.init = vayu_tianma_init,
++};
++
++static const struct vayu_panel_desc vayu_csot_desc = {
++	.init = vayu_csot_init,
++};
++
++static const struct of_device_id vayu_panel_of_match[] = {
++	{ .compatible = "tianma,nt36672c-j20s", .data = &vayu_tianma_desc },
++	{ .compatible = "csot,nt36672c-j20s", .data = &vayu_csot_desc },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, vayu_panel_of_match);
++
++static struct mipi_dsi_driver vayu_panel_driver = {
++	.probe = vayu_panel_probe,
++	.remove = vayu_panel_remove,
++	.driver = {
++		.name = "panel-xiaomi-vayu-nt36672c",
++		.of_match_table = vayu_panel_of_match,
++	},
++};
++module_mipi_dsi_driver(vayu_panel_driver);
++
++MODULE_DESCRIPTION("DRM driver for the NT36672C panels of the Xiaomi POCO X3 Pro");
++MODULE_LICENSE("GPL");

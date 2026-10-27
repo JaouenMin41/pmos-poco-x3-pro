@@ -1,0 +1,30 @@
+name: Problème
+description: Quelque chose ne marche pas comme prévu (build, script, documentation…)
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: Que se passe-t-il ?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Étapes pour reproduire
+      placeholder: |
+        1. ./scripts/install-overlay.sh
+        2. pmbootstrap install
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Résultat attendu
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Sortie de la commande, ou `pmbootstrap log` pour un échec de build.
+      render: text

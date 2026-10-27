@@ -1,0 +1,32 @@
+From b75a2fbb666e0b4afd3d593ceb0afde884ae15f2 Mon Sep 17 00:00:00 2001
+From: Jaouen <74923920+JaouenMin41@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 04:32:40 +0000
+Subject: [PATCH 4/5] arm64: dts: qcom: sm8150-xiaomi-raphael: drop reference
+ to missing ipa node
+
+sm8150.dtsi in this tree has no ipa node, which breaks 'make dtbs'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Maqjg6rG5ZJyxi8ZriSu69
+---
+ arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts | 7 -------
+ 1 file changed, 7 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+index eaf9f7ff9..a45d0d77a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
++++ b/arch/arm64/boot/dts/qcom/sm8150-xiaomi-raphael.dts
+@@ -549,13 +549,6 @@ goodix@5d {
+ 	};
+ };
+ 
+-&ipa {
+-	status = "okay";
+-	qcom,gsi-loader = "self";
+-	memory-region = <&ipa_fw_mem>;
+-	firmware-name = "qcom/sm8150/Xiaomi/raphael/ipa_fws.mbn";
+-};
+-
+ &mdss_dsi0 {
+ 	vdda-supply = <&vdda_mipi_dsi0_1p2>;
+ 	status = "okay";

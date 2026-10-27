@@ -1,0 +1,6 @@
+/build/
+*.img
+*.dtb
+*.ko
+vayu-firmware/
+sauvegarde-vayu/
