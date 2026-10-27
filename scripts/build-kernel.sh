@@ -15,7 +15,7 @@ set -eu
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$REPO_DIR/build/linux"
-BASE_URL="https://gitlab.com/sm8150-mainline/linux.git"
+BASE_URL="${BASE_URL:-https://gitlab.com/sm8150-mainline/linux.git}"
 BASE_BRANCH="sm8150/6.17"
 BASE_COMMIT="c340f8ec4fa41eb94b82f233ddcce15fd0aaec17"
 JOBS="${JOBS:-$(nproc)}"
@@ -33,7 +33,7 @@ prepare_tree() {
 	if ! git rev-parse -q --verify vayu >/dev/null; then
 		git checkout -b vayu "$BASE_COMMIT"
 		git -c user.name="${GIT_AUTHOR_NAME:-vayu-build}" -c user.email="${GIT_AUTHOR_EMAIL:-vayu-build@localhost}" \
-			am "$REPO_DIR"/kernel/patches/*.patch
+			am --keep-cr "$REPO_DIR"/kernel/patches/*.patch
 	else
 		git checkout vayu
 	fi
